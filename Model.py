@@ -1,52 +1,89 @@
-#Unet structure:
-#Contracting path - downsampling layers via convolution and sampling
-#Expansive path - Upsampling layers via interpolation and convolutions
-#Skip connections - connections preserving information from contacting path into expansive path
+"""Model definition (PyTorch).
 
-import tensorflow as tf
-from tensorflow.keras import Model, layers, Input
+Provides a U-Net for binary segmentation.
 
-#2 classes in dataset, 2 feature maps
-#Convolutions for contracting path
-def unet_model(imageL=512, imageW=512, channels=3):
-  inputs = Input(shape=(imageL, imageW, channels))
-  print(inputs)
-  def double_conv(x, filters):
-    x = layers.Conv2D(filters, kernel_size=3, padding='same', kernel_initializer='he_normal', activation='relu')(x)
-    x = layers.Conv2D(filters, kernel_size=3, padding='same', kernel_initializer='he_normal', activation='relu')(x)
-    return x
+Contract:
+- Input:  (N, 3, H, W) float32 in [0, 1]
+- Output: (N, 1, H, W) logits (NOT sigmoid)
+"""
 
-  def down_sample(x, filters):
-    conv = double_conv(x, filters)
-    pool = layers.MaxPooling2D(pool_size=2, strides=2)(conv)
-    return conv, pool
+from __future__ import annotations
 
-  def up_sample(x, skip, filters):
-    up = layers.Conv2DTranspose(filters, kernel_size=2, strides=2, padding='same')(x)
-    up = layers.Concatenate(axis=-1)([up, skip])
-    up = double_conv(up, filters)
-    return up
+import torch
+import torch.nn as nn
 
-  down1, pool1 = down_sample(inputs, 64)
-  down2, pool2 = down_sample(pool1, 128)
-  down3, pool3 = down_sample(pool2, 256)
 
-  bn = double_conv(pool3, 512)
+class DoubleConv(nn.Module):
+  def __init__(self, in_ch: int, out_ch: int):
+    super().__init__()
+    self.net = nn.Sequential(
+      nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False),
+      nn.BatchNorm2d(out_ch),
+      nn.ReLU(inplace=True),
+      nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, bias=False),
+      nn.BatchNorm2d(out_ch),
+      nn.ReLU(inplace=True),
+    )
 
-  up3 = up_sample(bn, down3, 256)
-  up2 = up_sample(up3, down2, 128)
-  up1 = up_sample(up2, down1, 64)
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    return self.net(x)
 
-  outp = layers.Conv2D(1, kernel_size=1, padding='same', activation='sigmoid')(up1)
-  model = Model(inputs, outp)
-  return model
 
-model = unet_model()
-model.summary()
-tf.keras.utils.plot_model(
-    model,
-    to_file="unet_horizontal.png",   
-    show_shapes=True,                
-    rankdir="LR",                   
-    dpi=150                          
-)
+class UNet(nn.Module):
+  def __init__(
+    self,
+    in_channels: int = 3,
+    out_channels: int = 1,
+    features: tuple[int, ...] = (64, 128, 256, 512),
+  ):
+    super().__init__()
+
+    self.downs = nn.ModuleList()
+    self.pools = nn.ModuleList()
+
+    ch = in_channels
+    for f in features:
+      self.downs.append(DoubleConv(ch, f))
+      self.pools.append(nn.MaxPool2d(kernel_size=2, stride=2))
+      ch = f
+
+    self.bottleneck = DoubleConv(features[-1], features[-1] * 2)
+
+    self.upconvs = nn.ModuleList()
+    self.ups = nn.ModuleList()
+
+    up_ch = features[-1] * 2
+    for f in reversed(features):
+      self.upconvs.append(nn.ConvTranspose2d(up_ch, f, kernel_size=2, stride=2))
+      self.ups.append(DoubleConv(f * 2, f))
+      up_ch = f
+
+    self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    skips: list[torch.Tensor] = []
+
+    for down, pool in zip(self.downs, self.pools):
+      x = down(x)
+      skips.append(x)
+      x = pool(x)
+
+    x = self.bottleneck(x)
+
+    for upconv, up, skip in zip(self.upconvs, self.ups, reversed(skips)):
+      x = upconv(x)
+
+      # if shapes mismatch by 1px (odd dimensions), resize
+      if x.shape[-2:] != skip.shape[-2:]:
+        x = nn.functional.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
+
+      x = torch.cat([skip, x], dim=1)
+      x = up(x)
+
+    return self.final_conv(x)
+
+
+def unet_model(imageL: int = 512, imageW: int = 512, channels: int = 3) -> UNet:
+  """Back-compat factory matching the older Keras-style call sites."""
+  _ = imageL, imageW
+  return UNet(in_channels=channels, out_channels=1)

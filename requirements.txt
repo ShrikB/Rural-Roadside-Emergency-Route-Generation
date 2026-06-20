@@ -1,0 +1,27 @@
+# Deep Learning Framework (PyTorch)
+torch
+torchvision
+
+# Data Processing and Scientific Computing
+numpy
+pandas
+
+# Machine Learning
+scikit-learn
+
+# Image Processing
+Pillow
+
+# Plotting and Visualization
+matplotlib
+
+# Progress Bars
+tqdm
+
+# Web App
+streamlit
+streamlit-image-coordinates
+
+# Notes:
+# - opencv-python not required by the current PyTorch pipeline (Pillow is used).
+# - If you want notebook support, you can add: jupyter, ipykernel

@@ -1,77 +1,110 @@
+"""Data loading (PyTorch).
+
+Exports:
+- train_ds, val_ds, test_ds: torch.utils.data.DataLoader
+
+Notes:
+- Assumes DeepGlobe-style naming: *_sat.jpg and *_mask.png
+- Produces tensors:
+  - image: float32 (C,H,W) in [0,1]
+  - mask:  float32 (1,H,W) in {0,1}
+"""
+
+from __future__ import annotations
+
 import os
 from glob import glob
+from typing import List, Tuple
+
+import numpy as np
+from PIL import Image
 from sklearn.model_selection import train_test_split
-from tensorflow.keras.preprocessing.image import load_img, img_to_array
-import tensorflow as tf
-import matplotlib.pyplot as plt
 
-base_dir = 'deepglobe/'
-train_dir = os.path.join(base_dir, 'train/')
-test_dir =  os.path.join(base_dir, 'testset/')
-img_size = (512, 512)
-batch_size = 4
+import torch
+from torch.utils.data import Dataset, DataLoader
 
-img_paths  = sorted(glob(os.path.join(train_dir, '*_sat.jpg')))
-mask_paths = sorted(glob(os.path.join(train_dir, '*_mask.png')))
 
-test_imgs = sorted(glob(os.path.join(test_dir, '*_sat.jpg')))
-test_masks = sorted(glob(os.path.join(test_dir, '*_mask.png')))
+base_dir = "deepglobe/"
+train_dir = os.path.join(base_dir, "train/")
+test_dir = os.path.join(base_dir, "testset/")
 
-img_exp = load_img(train_dir + '655_sat.jpg', target_size=(512,512))
-pth_exp = load_img(train_dir + '655_mask.png', target_size=(512,512))
-arr = img_to_array(img_exp)
-print(arr.shape)
+img_size: Tuple[int, int] = (512, 512)
+batch_size: int = 4
+num_workers: int = 2
 
-plt.figure(figsize=(6,6))
-plt.imshow(img_exp)
-plt.axis('off')
-plt.show()
 
-plt.figure(figsize=(6,6))
-plt.imshow(pth_exp)
-plt.axis('off')  
-plt.show()
+def _find_pairs(dir_path: str) -> Tuple[List[str], List[str]]:
+    imgs = sorted(glob(os.path.join(dir_path, "*_sat.jpg")))
+    masks = sorted(glob(os.path.join(dir_path, "*_mask.png")))
+    return imgs, masks
 
-#Split into train/validation lists
+
+class SegmentationDataset(Dataset):
+    def __init__(self, img_paths: List[str], mask_paths: List[str], size: Tuple[int, int]):
+        if len(img_paths) != len(mask_paths):
+            raise ValueError(f"Mismatched images ({len(img_paths)}) and masks ({len(mask_paths)})")
+        self.img_paths = img_paths
+        self.mask_paths = mask_paths
+        self.size = size
+
+    def __len__(self) -> int:
+        return len(self.img_paths)
+
+    def __getitem__(self, idx: int):
+        img = Image.open(self.img_paths[idx]).convert("RGB").resize(self.size, resample=Image.BILINEAR)
+        mask = Image.open(self.mask_paths[idx]).convert("L").resize(self.size, resample=Image.NEAREST)
+
+        img_np = np.asarray(img, dtype=np.float32) / 255.0  # (H,W,3)
+        mask_np = (np.asarray(mask, dtype=np.uint8) > 128).astype(np.float32)  # (H,W)
+
+        img_t = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()  # (3,H,W)
+        mask_t = torch.from_numpy(mask_np)[None, ...].contiguous()  # (1,H,W)
+
+        return img_t, mask_t
+
+
+img_paths, mask_paths = _find_pairs(train_dir)
+test_imgs, test_masks = _find_pairs(test_dir)
+
 train_imgs, val_imgs, train_masks, val_masks = train_test_split(
-    img_paths, mask_paths,
+    img_paths,
+    mask_paths,
     test_size=0.20,
     random_state=49,
-    shuffle=True
+    shuffle=True,
 )
 
-#Preprocessing function
-def _parse_pair(img_path, mask_path):
+train_dataset = SegmentationDataset(train_imgs, train_masks, img_size)
+val_dataset = SegmentationDataset(val_imgs, val_masks, img_size)
+test_dataset = SegmentationDataset(test_imgs, test_masks, img_size)
 
-    img = tf.io.read_file(img_path)
-    img = tf.image.decode_jpeg(img, channels=3)
-    mask = tf.io.read_file(mask_path)
-    mask = tf.image.decode_png(mask, channels=1)
+train_ds = DataLoader(
+    train_dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    num_workers=num_workers,
+    pin_memory=True,
+)
+
+val_ds = DataLoader(
+    val_dataset,
+    batch_size=batch_size,
+    shuffle=False,
+    num_workers=num_workers,
+    pin_memory=True,
+)
+
+test_ds = DataLoader(
+    test_dataset,
+    batch_size=batch_size,
+    shuffle=False,
+    num_workers=num_workers,
+    pin_memory=True,
+)
 
 
-    img  = tf.image.resize(img, img_size, method='area')
-    mask = tf.image.resize(mask, img_size, method='nearest')
-
- 
-    img  = tf.cast(img, tf.float32) / 255.0
-    mask = tf.cast(mask > 128, tf.uint8)
-
-    return img, mask
-
-
-def make_dataset(img_list, mask_list, shuffle=True):
-    ds = tf.data.Dataset.from_tensor_slices((img_list, mask_list))
-    if shuffle:
-        ds = ds.shuffle(buffer_size=len(img_list))
-    ds = ds.map(_parse_pair, num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.batch(batch_size)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
-    return ds
-
-train_ds = make_dataset(train_imgs, train_masks, shuffle=True)
-val_ds   = make_dataset(val_imgs,   val_masks,   shuffle=False)
-test_ds  = make_dataset(test_imgs,  test_masks,  shuffle=False)
-# 5) Quick sanity check
-for imgs, msks in train_ds.take(1):
-    print("Batch img shape:", imgs.shape)   # → (batch_size, 256,256,3)
-    print("Batch mask shape:", msks.shape)  # → (batch_size, 256,256,1)
+if __name__ == "__main__":
+    # quick sanity check
+    imgs, msks = next(iter(train_ds))
+    print("Batch img shape:", tuple(imgs.shape))
+    print("Batch mask shape:", tuple(msks.shape))

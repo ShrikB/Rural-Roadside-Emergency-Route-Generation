@@ -2,5 +2,8 @@ unet_model4.keras
 __pycache__/
 deepglobe/
 .venv
+output_images/
+uNet.ipynb
+unet_model4.pt
 
     
